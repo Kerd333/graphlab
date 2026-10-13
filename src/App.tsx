@@ -151,10 +151,12 @@ function App() {
   const [representation, setRepresentation] = useState<Representation>('adjacency-matrix');
   const [toast, setToast] = useState('');
   const [zoom, setZoom] = useState(100);
+  const [pan, setPan] = useState({ x: 0, y: 0 });
+  const [isPanning, setIsPanning] = useState(false);
   const [eulerStep, setEulerStep] = useState<number | null>(null);
   const svgRef = useRef<SVGSVGElement>(null);
   const fileInput = useRef<HTMLInputElement>(null);
-  const dragRef = useRef<{ type: 'vertex' | 'edge' | 'connect'; id: string; offsetX: number; offsetY: number; startBend?: number; directed?: boolean } | null>(null);
+  const dragRef = useRef<{ type: 'vertex' | 'edge' | 'connect' | 'pan'; id: string; offsetX: number; offsetY: number; startBend?: number; directed?: boolean; startClientX?: number; startClientY?: number; startPanX?: number; startPanY?: number; panScaleX?: number; panScaleY?: number } | null>(null);
   const components = useMemo(() => getComponents(vertices, edges), [vertices, edges]);
   const euler = useMemo(() => findEuler(vertices, edges, directed), [vertices, edges, directed]);
   const mst = useMemo(() => minimumSpanningTree(vertices, edges), [vertices, edges]);
@@ -256,6 +258,29 @@ function App() {
     const transformed = point.matrixTransform(svg.getScreenCTM()?.inverse());
     return { x: transformed.x, y: transformed.y };
   };
+  const changeZoom = (nextZoom: number) => {
+    const clampedZoom = Math.max(50, Math.min(180, nextZoom));
+    const oldWidth = 1000 * 100 / zoom; const oldHeight = 680 * 100 / zoom;
+    const newWidth = 1000 * 100 / clampedZoom; const newHeight = 680 * 100 / clampedZoom;
+    setPan((current) => ({ x: current.x + (oldWidth - newWidth) / 2, y: current.y + (oldHeight - newHeight) / 2 }));
+    setZoom(clampedZoom);
+  };
+  const handleCanvasWheel = (event: React.WheelEvent<SVGSVGElement>) => {
+    event.preventDefault();
+    const svg = svgRef.current;
+    const inverse = svg?.getScreenCTM()?.inverse();
+    const pointer = svg?.createSVGPoint();
+    if (pointer && inverse) {
+      pointer.x = event.clientX; pointer.y = event.clientY;
+      const world = pointer.matrixTransform(inverse);
+      const oldWidth = 1000 * 100 / zoom; const oldHeight = 680 * 100 / zoom;
+      const fractionX = (world.x - pan.x) / oldWidth; const fractionY = (world.y - pan.y) / oldHeight;
+      const nextZoom = Math.max(50, Math.min(180, zoom * (event.deltaY < 0 ? 1.1 : 1 / 1.1)));
+      const newWidth = 1000 * 100 / nextZoom; const newHeight = 680 * 100 / nextZoom;
+      setPan({ x: world.x - fractionX * newWidth, y: world.y - fractionY * newHeight });
+      setZoom(nextZoom);
+    }
+  };
   const addVertex = (x: number, y: number) => {
     const id = `v${Date.now()}`;
     const usedLabels = new Set(vertices.map((vertex) => vertex.label));
@@ -285,6 +310,18 @@ function App() {
     return id;
   };
   const handleCanvasPointerDown = (event: React.PointerEvent<SVGSVGElement>) => {
+    if (event.button === 1 || (event.button === 0 && event.target === svgRef.current && mode === 'select')) {
+      event.preventDefault();
+      const svg = svgRef.current!;
+      const inverse = svg.getScreenCTM()?.inverse();
+      const userPoint = svg.createSVGPoint(); userPoint.x = event.clientX; userPoint.y = event.clientY;
+      const userX = svg.createSVGPoint(); userX.x = event.clientX + 1; userX.y = event.clientY;
+      const userY = svg.createSVGPoint(); userY.x = event.clientX; userY.y = event.clientY + 1;
+      const origin = userPoint.matrixTransform(inverse); const xUnit = userX.matrixTransform(inverse); const yUnit = userY.matrixTransform(inverse);
+      dragRef.current = { type: 'pan', id: 'canvas', offsetX: 0, offsetY: 0, startClientX: event.clientX, startClientY: event.clientY, startPanX: pan.x, startPanY: pan.y, panScaleX: xUnit.x - origin.x, panScaleY: yUnit.y - origin.y };
+      svg.setPointerCapture(event.pointerId); setSelectedVertex(null); setSelectedEdge(null); setIsPanning(true);
+      return;
+    }
     if (event.target === svgRef.current && mode === 'vertex') {
       const p = pointFromEvent(event); addVertex(p.x, p.y);
     } else if (event.target === svgRef.current) { setSelectedVertex(null); setSelectedEdge(null); }
@@ -327,6 +364,14 @@ function App() {
       setConnectPreview({ from: dragRef.current.id, x: p.x, y: p.y, directed: Boolean(dragRef.current.directed) });
       return;
     }
+    if (dragRef.current.type === 'pan') {
+      const drag = dragRef.current;
+      setPan({
+        x: (drag.startPanX ?? pan.x) - (event.clientX - (drag.startClientX ?? event.clientX)) * (drag.panScaleX ?? 1),
+        y: (drag.startPanY ?? pan.y) - (event.clientY - (drag.startClientY ?? event.clientY)) * (drag.panScaleY ?? 1),
+      });
+      return;
+    }
     if (dragRef.current.type === 'vertex') {
       const { id, offsetX, offsetY } = dragRef.current;
       setVertices((items) => items.map((v) => v.id === id ? { ...v, x: Math.max(36, Math.min(964, p.x + offsetX)), y: Math.max(36, Math.min(644, p.y + offsetY)) } : v));
@@ -358,6 +403,7 @@ function App() {
       }
     }
     setConnectPreview(null);
+    setIsPanning(false);
     dragRef.current = null;
   };
   const handleEdgeClick = (event: React.MouseEvent<SVGPathElement>, edge: Edge) => {
@@ -450,14 +496,14 @@ function App() {
           <div className="canvas-toolbar">
             <div className="canvas-breadcrumb"><span>CANVAS</span><span className="breadcrumb-dot">/</span><strong>{directed ? 'Directed graph' : 'Undirected multigraph'}</strong></div>
             <div className="canvas-actions">
-              <span className="keyboard-hint">{mode === 'vertex' ? 'CLICK CANVAS TO ADD' : mode === 'edge' ? (connectStart ? 'NOW SELECT ANOTHER VERTEX' : 'SELECT TWO VERTICES') : mode === 'delete' ? 'CLICK TO DELETE' : 'CTRL-DRAG EDGE · SHIFT-DRAG DIRECTED'}</span>
+              <span className="keyboard-hint">{mode === 'vertex' ? 'CLICK CANVAS TO ADD' : mode === 'edge' ? (connectStart ? 'NOW SELECT ANOTHER VERTEX' : 'SELECT TWO VERTICES') : mode === 'delete' ? 'CLICK TO DELETE' : 'DRAG CANVAS TO PAN · WHEEL TO ZOOM'}</span>
               <div className="small-divider" />
-              <button className="zoom-button" onClick={() => setZoom((v) => Math.max(60, v - 10))} aria-label="Zoom out"><Minus size={14} /></button><span className="zoom-level">{zoom}%</span><button className="zoom-button" onClick={() => setZoom((v) => Math.min(140, v + 10))} aria-label="Zoom in"><Plus size={14} /></button><button className="zoom-button fit-button" onClick={() => setZoom(100)} title="Reset zoom"><Expand size={14} /></button>
+              <button className="zoom-button" onClick={() => changeZoom(zoom - 10)} aria-label="Zoom out"><Minus size={14} /></button><span className="zoom-level">{Math.floor(zoom)}%</span><button className="zoom-button" onClick={() => changeZoom(zoom + 10)} aria-label="Zoom in"><Plus size={14} /></button><button className="zoom-button fit-button" onClick={() => { setZoom(100); setPan({ x: 0, y: 0 }); }} title="Reset zoom and position"><Expand size={14} /></button>
             </div>
           </div>
           <div className="canvas-wrap">
-            <svg ref={svgRef} className={`graph-canvas mode-${mode}`} viewBox="0 0 1000 680" preserveAspectRatio="xMidYMid meet" onPointerDown={handleCanvasPointerDown} onPointerMove={onPointerMove} onPointerUp={endDrag} onPointerCancel={endDrag} style={{ transform: `scale(${zoom / 100})` }}>
-              <defs><pattern id="dot-grid" width="24" height="24" patternUnits="userSpaceOnUse"><circle cx="1" cy="1" r="1" fill="#293039" /></pattern><marker id="arrow" markerWidth="8" markerHeight="8" refX="7" refY="4" orient="auto" markerUnits="userSpaceOnUse"><path d="M0,0 L8,4 L0,8 z" fill="#8b96a4" /></marker><marker id="arrow-active" markerWidth="8" markerHeight="8" refX="7" refY="4" orient="auto" markerUnits="userSpaceOnUse"><path d="M0,0 L8,4 L0,8 z" fill="#94f3cb" /></marker></defs>
+            <svg ref={svgRef} className={`graph-canvas mode-${mode} ${isPanning ? 'is-panning' : ''}`} viewBox={`${pan.x} ${pan.y} ${1000 * 100 / zoom} ${680 * 100 / zoom}`} preserveAspectRatio="xMidYMid meet" onPointerDown={handleCanvasPointerDown} onPointerMove={onPointerMove} onPointerUp={endDrag} onPointerCancel={endDrag} onWheel={handleCanvasWheel}>
+              <defs><pattern id="dot-grid" width="24" height="24" patternUnits="userSpaceOnUse"><circle cx="1" cy="1" r="1" fill="#293039" /></pattern><marker id="arrow" markerWidth="8" markerHeight="8" refX="7" refY="4" orient="auto" markerUnits="userSpaceOnUse"><path d="M0,0 L8,4 L0,8 z" fill="#8b96a4" /></marker><marker id="arrow-active" markerWidth="8" markerHeight="8" refX="7" refY="4" orient="auto" markerUnits="userSpaceOnUse"><path d="M0,0 L8,4 L0,8 z" fill="#94f3cb" /></marker><marker id="arrow-mst" markerWidth="8" markerHeight="8" refX="7" refY="4" orient="auto" markerUnits="userSpaceOnUse"><path d="M0,0 L8,4 L0,8 z" fill="#63a9ff" /></marker><marker id="arrow-euler" markerWidth="8" markerHeight="8" refX="7" refY="4" orient="auto" markerUnits="userSpaceOnUse"><path d="M0,0 L8,4 L0,8 z" fill="#94f3cb" /></marker></defs>
               <rect className="canvas-bg" width="1000" height="680" fill="url(#dot-grid)" style={{ pointerEvents: 'none' }} />
               {connectPreview && (() => {
                 const origin = vertices.find((vertex) => vertex.id === connectPreview.from);
@@ -474,7 +520,7 @@ function App() {
                   const currentTrailEdge = eulerStep !== null && trailEdgeIndex === eulerStep;
                   return <g key={edge.id} className={`edge-group ${active ? 'selected' : ''} ${inMst ? 'mst-edge' : ''} ${traversed ? 'euler-traversed' : ''} ${currentTrailEdge ? 'euler-current' : ''}`}>
                     <path d={geometry.d} className="edge-hit" onPointerDown={(event) => onEdgePointerDown(event, edge)} onClick={(event) => handleEdgeClick(event, edge)} />
-                    <path d={geometry.d} className={`edge-line ${active ? 'edge-line-active' : ''}`} markerEnd={directed ? (active ? 'url(#arrow-active)' : 'url(#arrow)') : undefined} />
+                    <path d={geometry.d} className={`edge-line ${active ? 'edge-line-active' : ''}`} markerEnd={directed ? (traversed || currentTrailEdge ? 'url(#arrow-euler)' : inMst ? 'url(#arrow-mst)' : active ? 'url(#arrow-active)' : 'url(#arrow)') : undefined} />
                     <circle cx={geometry.labelX} cy={geometry.labelY} r="13" className={`weight-pill ${weighted ? '' : 'hidden-weight'}`} />
                     {weighted && <text x={geometry.labelX} y={geometry.labelY + 3.5} className="edge-weight" onPointerDown={(event) => onEdgePointerDown(event as unknown as React.PointerEvent<SVGPathElement>, edge)}>{edge.weight}</text>}
                   </g>;
