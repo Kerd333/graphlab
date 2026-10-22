@@ -397,6 +397,7 @@ function App() {
   const [connectStart, setConnectStart] = useState<string | null>(null);
   const [connectPreview, setConnectPreview] = useState<{ from: string; x: number; y: number; directed: boolean } | null>(null);
   const [tab, setTab] = useState<Tab>('overview');
+  const [mobileInspectorOpen, setMobileInspectorOpen] = useState(false);
   const [representation, setRepresentation] = useState<Representation>('adjacency-matrix');
   const [toast, setToast] = useState('');
   const [zoom, setZoom] = useState(100);
@@ -765,7 +766,7 @@ function App() {
   const eulerTraveler = eulerStep !== null && euler ? vertices.find((vertex) => vertex.id === euler.vertices[Math.min(eulerStep, euler.vertices.length - 1)]) : null;
 
   return (
-    <main className="app-shell">
+    <main className={`app-shell ${mobileInspectorOpen ? 'mobile-inspector-open' : ''}`}>
       <header className="topbar">
         <div className="brand"><div className="brand-mark"><Waypoints size={19} strokeWidth={2.2} /></div><div className="brand-name">graph<span>lab</span><small>WORKBENCH</small></div></div>
         <div className="top-divider" />
@@ -848,10 +849,11 @@ function App() {
             <div className="canvas-legend"><span><i className="legend-node" />Vertex</span><span><i className="legend-edge" />{directed ? 'Arc' : 'Edge'}</span><span><i className="legend-weight">2</i>Weight</span></div>
             <div className="canvas-status"><span className="status-dot" />{mode === 'edge' ? connectStart ? 'Choose destination vertex' : 'Ready to connect' : mode === 'vertex' ? 'Click canvas to place vertex' : mode === 'delete' ? 'Delete mode' : 'Ready to edit graph'}</div>
           </div>
-          <div className="bottom-strip"><span><Grid2X2 size={14} /> {components.length} {components.length === 1 ? 'component' : 'components'}</span><span className="strip-separator" /><span><Layers size={14} /> Multigraph enabled</span><span className="strip-spacer" /><span className="coordinates">GRAPH THEORY / INTERACTIVE MODE</span></div>
+          <div className="bottom-strip"><span><Grid2X2 size={14} /> {components.length} {components.length === 1 ? 'component' : 'components'}</span><span className="strip-separator" /><span><Layers size={14} /> Multigraph enabled</span><span className="strip-spacer" /><span className="coordinates">GRAPH THEORY / INTERACTIVE MODE</span><button className="mobile-inspector-trigger" onClick={() => setMobileInspectorOpen(true)}><Info size={14} /> Inspect</button></div>
         </section>
-        <aside className="inspector">
-          <div className="inspector-tabs"><button className={tab === 'overview' ? 'tab-active' : ''} onClick={() => setTab('overview')}>Overview</button><button className={tab === 'algorithms' ? 'tab-active' : ''} onClick={() => setTab('algorithms')}>Algorithms <span className="new-dot" /></button><button className={tab === 'representations' ? 'tab-active' : ''} onClick={() => setTab('representations')}>Matrices</button><button className={tab === 'explorers' ? 'tab-active' : ''} onClick={() => setTab('explorers')}>Explore</button></div>
+        <button className="mobile-inspector-backdrop" aria-label="Close graph inspector" onClick={() => setMobileInspectorOpen(false)} />
+        <aside className="inspector" aria-label="Graph inspector">
+          <div className="inspector-tabs"><button className={tab === 'overview' ? 'tab-active' : ''} onClick={() => setTab('overview')}>Overview</button><button className={tab === 'algorithms' ? 'tab-active' : ''} onClick={() => setTab('algorithms')}>Algorithms <span className="new-dot" /></button><button className={tab === 'representations' ? 'tab-active' : ''} onClick={() => setTab('representations')}>Matrices</button><button className={tab === 'explorers' ? 'tab-active' : ''} onClick={() => setTab('explorers')}>Explore</button><button className="mobile-inspector-close" aria-label="Close graph inspector" onClick={() => setMobileInspectorOpen(false)}><X size={17} /></button></div>
           {tab === 'overview' ? <div className="inspector-scroll">
             <section className="panel-section graph-summary"><div className="section-eyebrow">GRAPH SUMMARY <span className="summary-spark"><Sparkles size={13} /></span></div><h2>{directed ? 'Directed' : 'Undirected'}<br /><span>{edges.length > 0 && edges.length >= vertices.length ? 'multigraph' : 'graph'}</span></h2><div className="summary-meta"><span><b>{vertices.length}</b> vertices</span><span><b>{edges.length}</b> edges</span></div></section>
                 <section className="panel-section"><div className="section-title">Structure <button className="plain-icon" title="Structural properties"><Info size={14} /></button></div><div className="property-list"><div className="property-row"><span>{directed ? 'Weakly connected' : 'Connected'}</span><span className={`property-value ${components.length === 1 ? 'good' : 'warn'}`}><i />{components.length === 1 ? 'Yes' : 'No'}</span></div><div className="property-row"><span>Components</span><span className="property-value">{components.length}</span></div><div className="property-row"><span>Average degree</span><span className="property-value">{graphProperties.averageDegree.toFixed(2)}</span></div><div className="property-row"><span>Complete</span><span className={`property-value ${graphProperties.complete ? 'good' : ''}`}>{graphProperties.complete ? 'Yes' : 'No'}</span></div><div className="property-row"><span>Bipartite</span><span className={`property-value ${graphProperties.bipartite ? 'good' : 'warn'}`}>{graphProperties.bipartite ? 'Yes' : 'No'}</span></div><div className="property-row"><span>Regular</span><span className={`property-value ${graphProperties.regular ? 'good' : ''}`}>{graphProperties.regular ? `Yes · degree ${graphProperties.regularDegree}` : 'No'}</span></div><div className="property-row"><span>Self-loops</span><span className="property-value">{edges.filter((e) => e.from === e.to).length}</span></div><div className="property-row"><span>Parallel edges</span><span className="property-value">{edges.length - new Set(edges.map((e) => [e.from, e.to].sort().join(':'))).size}</span></div><div className="property-row"><span>Density</span><span className="property-value">{(graphProperties.density * 100).toFixed(0)}%</span></div></div></section>
