@@ -407,6 +407,8 @@ function App() {
   const svgRef = useRef<SVGSVGElement>(null);
   const fileInput = useRef<HTMLInputElement>(null);
   const dragRef = useRef<{ type: 'vertex' | 'edge' | 'connect' | 'pan'; id: string; offsetX: number; offsetY: number; startBend?: number; directed?: boolean; startClientX?: number; startClientY?: number; startPanX?: number; startPanY?: number; panScaleX?: number; panScaleY?: number } | null>(null);
+  const touchPointsRef = useRef(new Map<number, { x: number; y: number }>());
+  const pinchRef = useRef<{ pointerIds: [number, number]; startDistance: number; startZoom: number; startPanX: number; startPanY: number; startCenterX: number; startCenterY: number; startWorldX: number; startWorldY: number; fractionX: number; fractionY: number; screenToWorld: DOMMatrix } | null>(null);
   const components = useMemo(() => getComponents(vertices, edges), [vertices, edges]);
   const euler = useMemo(() => findEuler(vertices, edges, directed), [vertices, edges, directed]);
   const mst = useMemo(() => minimumSpanningTree(vertices, edges), [vertices, edges]);
@@ -516,6 +518,9 @@ function App() {
     setPan((current) => ({ x: current.x + (oldWidth - newWidth) / 2, y: current.y + (oldHeight - newHeight) / 2 }));
     setZoom(clampedZoom);
   };
+  const capturePointer = (pointerId: number) => {
+    try { svgRef.current?.setPointerCapture(pointerId); } catch { /* The pointer may already have been released. */ }
+  };
   const handleCanvasWheel = (event: React.WheelEvent<SVGSVGElement>) => {
     event.preventDefault();
     const svg = svgRef.current;
@@ -531,6 +536,55 @@ function App() {
       setPan({ x: world.x - fractionX * newWidth, y: world.y - fractionY * newHeight });
       setZoom(nextZoom);
     }
+  };
+  const handleTouchPointerDownCapture = (event: React.PointerEvent<SVGSVGElement>) => {
+    if (event.pointerType !== 'touch') return;
+    const points = touchPointsRef.current;
+    points.set(event.pointerId, { x: event.clientX, y: event.clientY });
+    if (pinchRef.current || points.size < 2) return;
+    const [firstId, secondId] = [...points.keys()].slice(0, 2);
+    const first = points.get(firstId)!; const second = points.get(secondId)!;
+    const svg = svgRef.current; const screenToWorld = svg?.getScreenCTM()?.inverse();
+    if (!svg || !screenToWorld) return;
+    event.preventDefault(); event.stopPropagation();
+    const startCenterX = (first.x + second.x) / 2; const startCenterY = (first.y + second.y) / 2;
+    const center = svg.createSVGPoint(); center.x = startCenterX; center.y = startCenterY;
+    const world = center.matrixTransform(screenToWorld);
+    const width = 1000 * 100 / zoom; const height = 680 * 100 / zoom;
+    pinchRef.current = {
+      pointerIds: [firstId, secondId], startDistance: Math.hypot(second.x - first.x, second.y - first.y),
+      startZoom: zoom, startPanX: pan.x, startPanY: pan.y, startCenterX, startCenterY,
+      startWorldX: world.x, startWorldY: world.y, fractionX: (world.x - pan.x) / width,
+      fractionY: (world.y - pan.y) / height, screenToWorld,
+    };
+    dragRef.current = null; setConnectPreview(null); setIsPanning(false);
+    capturePointer(firstId); capturePointer(secondId);
+  };
+  const handleTouchPointerMoveCapture = (event: React.PointerEvent<SVGSVGElement>) => {
+    if (event.pointerType !== 'touch' || !touchPointsRef.current.has(event.pointerId)) return;
+    touchPointsRef.current.set(event.pointerId, { x: event.clientX, y: event.clientY });
+    const pinch = pinchRef.current;
+    if (!pinch || !pinch.pointerIds.includes(event.pointerId)) return;
+    event.preventDefault(); event.stopPropagation();
+    const first = touchPointsRef.current.get(pinch.pointerIds[0]);
+    const second = touchPointsRef.current.get(pinch.pointerIds[1]);
+    if (!first || !second) return;
+    const distance = Math.hypot(second.x - first.x, second.y - first.y);
+    const centerX = (first.x + second.x) / 2; const centerY = (first.y + second.y) / 2;
+    const targetZoom = Math.max(50, Math.min(180, pinch.startZoom * distance / pinch.startDistance));
+    const width = 1000 * 100 / targetZoom; const height = 680 * 100 / targetZoom;
+    const deltaX = centerX - pinch.startCenterX; const deltaY = centerY - pinch.startCenterY;
+    const worldX = pinch.startWorldX + pinch.screenToWorld.a * deltaX + pinch.screenToWorld.c * deltaY;
+    const worldY = pinch.startWorldY + pinch.screenToWorld.b * deltaX + pinch.screenToWorld.d * deltaY;
+    setPan({ x: worldX - pinch.fractionX * width, y: worldY - pinch.fractionY * height });
+    setZoom(targetZoom);
+  };
+  const handleTouchPointerEndCapture = (event: React.PointerEvent<SVGSVGElement>) => {
+    if (event.pointerType !== 'touch') return;
+    touchPointsRef.current.delete(event.pointerId);
+    if (!pinchRef.current || !pinchRef.current.pointerIds.includes(event.pointerId)) return;
+    event.preventDefault(); event.stopPropagation();
+    pinchRef.current = null; dragRef.current = null; setConnectPreview(null); setIsPanning(false);
   };
   const addVertex = (x: number, y: number) => {
     const id = `v${Date.now()}`;
@@ -570,7 +624,7 @@ function App() {
       const userY = svg.createSVGPoint(); userY.x = event.clientX; userY.y = event.clientY + 1;
       const origin = userPoint.matrixTransform(inverse); const xUnit = userX.matrixTransform(inverse); const yUnit = userY.matrixTransform(inverse);
       dragRef.current = { type: 'pan', id: 'canvas', offsetX: 0, offsetY: 0, startClientX: event.clientX, startClientY: event.clientY, startPanX: pan.x, startPanY: pan.y, panScaleX: xUnit.x - origin.x, panScaleY: yUnit.y - origin.y };
-      svg.setPointerCapture(event.pointerId); setSelectedVertex(null); setSelectedEdge(null); setIsPanning(true);
+      capturePointer(event.pointerId); setSelectedVertex(null); setSelectedEdge(null); setIsPanning(true);
       return;
     }
     if (event.target === svgRef.current && mode === 'vertex') {
@@ -584,7 +638,7 @@ function App() {
       dragRef.current = { type: 'connect', id: vertex.id, offsetX: 0, offsetY: 0, directed: event.shiftKey };
       setConnectPreview({ from: vertex.id, x: vertex.x, y: vertex.y, directed: event.shiftKey });
       setSelectedVertex(vertex.id); setSelectedEdge(null);
-      svgRef.current?.setPointerCapture(event.pointerId);
+      capturePointer(event.pointerId);
       return;
     }
     if (mode === 'edge') {
@@ -598,7 +652,7 @@ function App() {
     setSelectedVertex(vertex.id); setSelectedEdge(null);
     const p = pointFromEvent(event as unknown as React.PointerEvent<SVGSVGElement>);
     dragRef.current = { type: 'vertex', id: vertex.id, offsetX: vertex.x - p.x, offsetY: vertex.y - p.y };
-    svgRef.current?.setPointerCapture(event.pointerId);
+    capturePointer(event.pointerId);
   };
   const onEdgePointerDown = (event: React.PointerEvent<SVGPathElement>, edge: Edge) => {
     event.stopPropagation();
@@ -606,7 +660,7 @@ function App() {
     setSelectedEdge(edge.id); setSelectedVertex(null);
     const p = pointFromEvent(event as unknown as React.PointerEvent<SVGSVGElement>);
     dragRef.current = { type: 'edge', id: edge.id, offsetX: p.x, offsetY: p.y, startBend: edge.bend };
-    svgRef.current?.setPointerCapture(event.pointerId);
+    capturePointer(event.pointerId);
   };
   const onPointerMove = (event: React.PointerEvent<SVGSVGElement>) => {
     if (!dragRef.current) return;
@@ -806,7 +860,7 @@ function App() {
             </div>
           </div>
           <div className="canvas-wrap">
-            <svg ref={svgRef} className={`graph-canvas mode-${mode} ${isPanning ? 'is-panning' : ''} ${layoutAnimation ? 'planarizing' : ''}`} viewBox={`${pan.x} ${pan.y} ${1000 * 100 / zoom} ${680 * 100 / zoom}`} preserveAspectRatio="xMidYMid meet" onPointerDown={handleCanvasPointerDown} onPointerMove={onPointerMove} onPointerUp={endDrag} onPointerCancel={endDrag} onWheel={handleCanvasWheel}>
+            <svg ref={svgRef} className={`graph-canvas mode-${mode} ${isPanning ? 'is-panning' : ''} ${layoutAnimation ? 'planarizing' : ''}`} viewBox={`${pan.x} ${pan.y} ${1000 * 100 / zoom} ${680 * 100 / zoom}`} preserveAspectRatio="xMidYMid meet" onPointerDownCapture={handleTouchPointerDownCapture} onPointerMoveCapture={handleTouchPointerMoveCapture} onPointerUpCapture={handleTouchPointerEndCapture} onPointerCancelCapture={handleTouchPointerEndCapture} onPointerDown={handleCanvasPointerDown} onPointerMove={onPointerMove} onPointerUp={endDrag} onPointerCancel={endDrag} onWheel={handleCanvasWheel}>
               <defs><pattern id="dot-grid" width="24" height="24" patternUnits="userSpaceOnUse"><circle cx="1" cy="1" r="1" fill="#293039" /></pattern><marker id="arrow" markerWidth="8" markerHeight="8" refX="7" refY="4" orient="auto" markerUnits="userSpaceOnUse"><path d="M0,0 L8,4 L0,8 z" fill="#8b96a4" /></marker><marker id="arrow-active" markerWidth="8" markerHeight="8" refX="7" refY="4" orient="auto" markerUnits="userSpaceOnUse"><path d="M0,0 L8,4 L0,8 z" fill="#94f3cb" /></marker><marker id="arrow-mst" markerWidth="8" markerHeight="8" refX="7" refY="4" orient="auto" markerUnits="userSpaceOnUse"><path d="M0,0 L8,4 L0,8 z" fill="#63a9ff" /></marker><marker id="arrow-euler" markerWidth="8" markerHeight="8" refX="7" refY="4" orient="auto" markerUnits="userSpaceOnUse"><path d="M0,0 L8,4 L0,8 z" fill="#94f3cb" /></marker></defs>
               <rect className="canvas-bg" width="1000" height="680" fill="url(#dot-grid)" style={{ pointerEvents: 'none' }} />
               {connectPreview && (() => {
