@@ -8,9 +8,10 @@ import {
 type Vertex = { id: string; x: number; y: number; label: string; color?: string };
 type Edge = { id: string; from: string; to: string; weight: number; bend: number };
 type Mode = 'select' | 'vertex' | 'edge' | 'delete';
-type Tab = 'overview' | 'algorithms' | 'representations';
+type Tab = 'overview' | 'algorithms' | 'representations' | 'explorers';
 type EulerTrail = { vertices: string[]; edges: string[] };
 type Representation = 'adjacency-matrix' | 'adjacency-list' | 'incidence-matrix';
+type GraphState = { vertices: Vertex[]; edges: Edge[]; directed: boolean };
 
 const palette = ['#94f3cb', '#a99af7', '#f6c77a', '#ff8d9f', '#76c8ff'];
 function generateRandomGraph() {
@@ -132,15 +133,263 @@ function minimumSpanningTree(vertices: Vertex[], edges: Edge[]) {
   return { edges: chosen, total: chosen.reduce((sum, edge) => sum + edge.weight, 0), complete: vertices.length <= 1 || (chosen.length === vertices.length - 1 && groups === 1) };
 }
 
+function graphSignature(graph: GraphState) {
+  const indices = new Map(graph.vertices.map((vertex, index) => [vertex.id, index]));
+  const matrix = graph.vertices.map((from) => graph.vertices.map((to) => graph.edges.reduce((sum, edge) => sum + Number(edge.from === from.id && edge.to === to.id || (!graph.directed && edge.from === to.id && edge.to === from.id)), 0)));
+  const degrees = graph.vertices.map((_, i) => graph.directed
+    ? matrix[i].reduce((sum, value) => sum + value, 0) + matrix.reduce((sum, row) => sum + row[i], 0)
+    : matrix[i].reduce((sum, value) => sum + value, 0));
+  return { matrix, degrees, indices };
+}
+
+function checkIsomorphism(a: GraphState, b: GraphState) {
+  if (a.directed !== b.directed) return { isomorphic: false, reason: 'One graph is directed and the other is undirected.', mapping: null as Map<string, string> | null };
+  if (a.vertices.length !== b.vertices.length) return { isomorphic: false, reason: `Vertex counts differ (${a.vertices.length} vs ${b.vertices.length}).`, mapping: null };
+  if (a.edges.length !== b.edges.length) return { isomorphic: false, reason: `Edge counts differ (${a.edges.length} vs ${b.edges.length}).`, mapping: null };
+  const multiplicitySpectrum = (graph: GraphState) => {
+    const multiplicities = new Map<string, number>();
+    graph.edges.forEach((edge) => { const key = graph.directed ? `${edge.from}>${edge.to}` : [edge.from, edge.to].sort().join('>'); multiplicities.set(key, (multiplicities.get(key) ?? 0) + 1); });
+    return [...multiplicities.values()].sort((x, y) => x - y).join(',');
+  };
+  if (multiplicitySpectrum(a) !== multiplicitySpectrum(b)) return { isomorphic: false, reason: 'The parallel-edge multiplicity patterns differ.', mapping: null };
+  const first = graphSignature(a); const second = graphSignature(b);
+  const histogram = (degrees: number[]) => [...degrees].sort((x, y) => x - y).join(',');
+  if (histogram(first.degrees) !== histogram(second.degrees)) return { isomorphic: false, reason: 'The vertex degree sequences differ.', mapping: null };
+  const candidates = a.vertices.map((vertex, i) => b.vertices.map((target, j) => ({ target, j })).filter(({ j }) => first.degrees[i] === second.degrees[j]).map(({ target }) => target));
+  const order = a.vertices.map((_, index) => index).sort((x, y) => candidates[x].length - candidates[y].length);
+  const mapping = new Map<number, number>(); const used = new Set<number>();
+  let searchBudget = 250000;
+  let exhausted = false;
+  const visit = (depth: number): boolean => {
+    if (--searchBudget < 0) { exhausted = true; return false; }
+    if (depth === order.length) return true;
+    const i = order[depth];
+    for (const candidate of candidates[i]) {
+      const j = second.indices.get(candidate.id)!;
+      if (used.has(j) || first.matrix[i][i] !== second.matrix[j][j]) continue;
+      let compatible = true;
+      for (const [mappedI, mappedJ] of mapping) {
+        if (first.matrix[i][mappedI] !== second.matrix[j][mappedJ] || first.matrix[mappedI][i] !== second.matrix[mappedJ][j]) { compatible = false; break; }
+      }
+      if (!compatible) continue;
+      mapping.set(i, j); used.add(j);
+      if (visit(depth + 1)) return true;
+      mapping.delete(i); used.delete(j);
+      if (exhausted) return false;
+    }
+    return false;
+  };
+  if (!visit(0)) return { isomorphic: false, reason: exhausted ? 'The exact search reached its computation limit; this result is inconclusive for these graphs.' : 'Degree counts match, but no vertex correspondence preserves every edge.', mapping: null, inconclusive: exhausted };
+  return { isomorphic: true, reason: 'A correspondence preserves the full adjacency structure.', mapping: new Map([...mapping].map(([i, j]) => [a.vertices[i].id, b.vertices[j].id])) };
+}
+
+function findAutomorphisms(graph: GraphState, limit = 20000) {
+  const signature = graphSignature(graph); const n = graph.vertices.length;
+  const candidates = graph.vertices.map((_, i) => graph.vertices.map((_, j) => j).filter((j) => signature.degrees[i] === signature.degrees[j] && signature.matrix[i][i] === signature.matrix[j][j]));
+  const order = graph.vertices.map((_, index) => index).sort((a, b) => candidates[a].length - candidates[b].length);
+  const mapping = new Map<number, number>(); const used = new Set<number>(); const automorphisms: number[][] = [];
+  let truncated = false;
+  const visit = (depth: number) => {
+    if (automorphisms.length >= limit) { truncated = true; return; }
+    if (depth === order.length) { automorphisms.push(Array.from({ length: n }, (_, i) => mapping.get(i)!)); return; }
+    const i = order[depth];
+    for (const j of candidates[i]) {
+      if (used.has(j)) continue;
+      let compatible = true;
+      for (const [otherI, otherJ] of mapping) if (signature.matrix[i][otherI] !== signature.matrix[j][otherJ] || signature.matrix[otherI][i] !== signature.matrix[otherJ][j]) { compatible = false; break; }
+      if (!compatible) continue;
+      mapping.set(i, j); used.add(j); visit(depth + 1); mapping.delete(i); used.delete(j);
+      if (truncated) return;
+    }
+  };
+  visit(0);
+  const parent = Array.from({ length: n }, (_, i) => i);
+  const find = (value: number): number => parent[value] === value ? value : (parent[value] = find(parent[value]));
+  for (const automorphism of automorphisms) automorphism.forEach((image, source) => { const a = find(source); const b = find(image); if (a !== b) parent[b] = a; });
+  const orbits = new Map<number, number[]>();
+  for (let i = 0; i < n; i++) { const root = find(i); orbits.set(root, [...(orbits.get(root) ?? []), i]); }
+  return { automorphisms, orbits: [...orbits.values()], truncated };
+}
+
+function testPlanarity(graph: GraphState) {
+  const ids = graph.vertices.map((vertex) => vertex.id);
+  const adjacency = new Map(ids.map((id) => [id, new Set<string>()]));
+  for (const edge of graph.edges) if (edge.from !== edge.to) { adjacency.get(edge.from)?.add(edge.to); adjacency.get(edge.to)?.add(edge.from); }
+  const unseen = new Set(ids); const components: string[][] = [];
+  while (unseen.size) {
+    const start = unseen.values().next().value as string; const queue = [start]; const component: string[] = []; unseen.delete(start);
+    while (queue.length) { const current = queue.shift()!; component.push(current); for (const next of adjacency.get(current) ?? []) if (unseen.delete(next)) queue.push(next); }
+    components.push(component);
+  }
+  let searchBudget = 250000;
+  for (const component of components) {
+    const nodes = new Set(component);
+    const links = [...new Set(component.flatMap((id) => [...(adjacency.get(id) ?? [])].filter((to) => id < to).map((to) => `${id}\u0000${to}`)))].map((key) => key.split('\u0000') as [string, string]);
+    const n = component.length; const m = links.length;
+    if (n >= 3 && m > 3 * n - 6) return { status: 'nonplanar' as const, reason: `This component has ${m} simple edges; a planar graph on ${n} vertices can have at most ${3 * n - 6}.` };
+    if (n <= 2 || m <= n - 1) continue;
+    const darts: { from: string; to: string; reverse: number }[] = [];
+    const at = new Map(component.map((id) => [id, [] as number[]]));
+    links.forEach(([a, b]) => { const first = darts.length; darts.push({ from: a, to: b, reverse: first + 1 }, { from: b, to: a, reverse: first }); at.get(a)!.push(first); at.get(b)!.push(first + 1); });
+    let embeddingCount = 1;
+    for (const incident of at.values()) for (let factor = 2; factor < incident.length; factor++) {
+      embeddingCount *= factor;
+      if (embeddingCount > searchBudget) return { status: 'unknown' as const, reason: 'The exact embedding search reached its computation limit; simplify the graph for a definitive result.' };
+    }
+    const rotations = new Map<string, number[][]>();
+    for (const [vertex, incident] of at) {
+      if (incident.length <= 2) { rotations.set(vertex, [incident]); continue; }
+      if (incident.length > 9) return { status: 'unknown' as const, reason: `Vertex ${graph.vertices.find((item) => item.id === vertex)?.label ?? vertex} has degree ${incident.length}; exact rotation enumeration is capped at 9.` };
+      const tails = incident.slice(1); const permutations: number[][] = [];
+      const permute = (remaining: number[], prefix: number[]) => {
+        if (!remaining.length) { permutations.push([incident[0], ...prefix]); return; }
+        for (let i = 0; i < remaining.length; i++) permute([...remaining.slice(0, i), ...remaining.slice(i + 1)], [...prefix, remaining[i]]);
+      };
+      permute(tails, []); rotations.set(vertex, permutations);
+    }
+    const orderedVertices = component.slice().sort((a, b) => rotations.get(a)!.length - rotations.get(b)!.length);
+    const rotation = new Map<string, number[]>(); let planar = false; let exhausted = false;
+    const checkEmbedding = () => {
+      const next = new Map<number, number>();
+      for (const [vertex, order] of rotation) for (let i = 0; i < order.length; i++) next.set(darts[order[i]].reverse, order[(i + 1) % order.length]);
+      const seen = new Set<number>(); let faces = 0;
+      for (let dart = 0; dart < darts.length; dart++) if (!seen.has(dart)) { faces++; let current = dart; while (!seen.has(current)) { seen.add(current); current = next.get(current)!; } }
+      return n - m + faces === 2;
+    };
+    const assign = (depth: number) => {
+      if (planar || exhausted) return;
+      if (depth === orderedVertices.length) { planar = checkEmbedding(); return; }
+      const vertex = orderedVertices[depth];
+      for (const order of rotations.get(vertex)!) {
+        if (--searchBudget < 0) { exhausted = true; return; }
+        rotation.set(vertex, order); assign(depth + 1); if (planar || exhausted) return;
+      }
+    };
+    assign(0);
+    if (exhausted) return { status: 'unknown' as const, reason: 'The exact embedding search reached its computation limit; simplify the graph for a definitive result.' };
+    if (!planar) return { status: 'nonplanar' as const, reason: 'No rotation of the incident edges forms a genus-zero planar embedding.' };
+  }
+  return { status: 'planar' as const, reason: 'Every connected component admits a planar embedding. Loops and parallel edges do not affect planarity.' };
+}
+
+function planarizeLayout(vertices: Vertex[], edges: Edge[]) {
+  const parent = new Map(vertices.map((vertex) => [vertex.id, vertex.id]));
+  const find = (id: string): string => parent.get(id) === id ? id : (parent.set(id, find(parent.get(id)!)), parent.get(id)!);
+  const kept: Edge[] = []; const adjacency = new Map(vertices.map((vertex) => [vertex.id, [] as string[]]));
+  for (const edge of edges) {
+    if (edge.from === edge.to) continue;
+    const fromRoot = find(edge.from); const toRoot = find(edge.to);
+    if (fromRoot === toRoot) continue;
+    parent.set(fromRoot, toRoot); kept.push(edge);
+    adjacency.get(edge.from)?.push(edge.to); adjacency.get(edge.to)?.push(edge.from);
+  }
+  const unseen = new Set(vertices.map((vertex) => vertex.id)); const groups: string[][] = [];
+  while (unseen.size) {
+    const root = unseen.values().next().value as string; const queue = [root]; const group: string[] = []; unseen.delete(root);
+    while (queue.length) { const current = queue.shift()!; group.push(current); for (const next of adjacency.get(current) ?? []) if (unseen.delete(next)) queue.push(next); }
+    groups.push(group);
+  }
+  const positions = new Map<string, { x: number; y: number }>(); let leafCursor = 0; let maxDepth = 1;
+  for (const group of groups) {
+    const root = group.slice().sort((a, b) => (vertices.find((v) => v.id === a)?.label ?? '').localeCompare(vertices.find((v) => v.id === b)?.label ?? ''))[0];
+    const visited = new Set<string>(); const depths = new Map<string, number>(); const treeChildren = new Map<string, string[]>();
+    const orient = (current: string, previous: string | null, depth: number) => {
+      visited.add(current); depths.set(current, depth); maxDepth = Math.max(maxDepth, depth);
+      const children = (adjacency.get(current) ?? []).filter((id) => id !== previous && !visited.has(id)).sort((a, b) => (vertices.find((v) => v.id === a)?.label ?? '').localeCompare(vertices.find((v) => v.id === b)?.label ?? ''));
+      treeChildren.set(current, children); children.forEach((child) => orient(child, current, depth + 1));
+    };
+    orient(root, null, 0);
+    const assign = (id: string): number => {
+      const children = treeChildren.get(id) ?? [];
+      if (!children.length) { const x = leafCursor++; positions.set(id, { x, y: depths.get(id)! }); return x; }
+      const centers = children.map(assign); const x = centers.reduce((sum, value) => sum + value, 0) / centers.length;
+      positions.set(id, { x, y: depths.get(id)! }); return x;
+    };
+    assign(root);
+    leafCursor += 1;
+  }
+  const availableWidth = 840; const leafSpan = Math.max(1, leafCursor - 1); const depthSpan = Math.max(1, maxDepth);
+  return {
+    edges: kept,
+    removed: edges.length - kept.length,
+    vertices: vertices.map((vertex) => { const position = positions.get(vertex.id)!; return { ...vertex, x: 80 + position.x / leafSpan * availableWidth, y: 90 + position.y / depthSpan * 500 }; }),
+  };
+}
+
+function improvePlanarLayout(vertices: Vertex[], edges: Edge[]) {
+  const pairs = [...new Set(edges.filter((edge) => edge.from !== edge.to).map((edge) => [edge.from, edge.to].sort().join('>')))];
+  const endpoints = pairs.map((pair) => pair.split('>'));
+  const crossingCount = (coords: { x: number; y: number }[]) => {
+    let count = 0;
+    const orient = (a: { x: number; y: number }, b: { x: number; y: number }, c: { x: number; y: number }) => (b.x - a.x) * (c.y - a.y) - (b.y - a.y) * (c.x - a.x);
+    for (let i = 0; i < endpoints.length; i++) for (let j = i + 1; j < endpoints.length; j++) {
+      const [aId, bId] = endpoints[i]; const [cId, dId] = endpoints[j];
+      if (aId === cId || aId === dId || bId === cId || bId === dId) continue;
+      const a = vertices.findIndex((vertex) => vertex.id === aId); const b = vertices.findIndex((vertex) => vertex.id === bId);
+      const c = vertices.findIndex((vertex) => vertex.id === cId); const d = vertices.findIndex((vertex) => vertex.id === dId);
+      const abC = orient(coords[a], coords[b], coords[c]); const abD = orient(coords[a], coords[b], coords[d]);
+      const cdA = orient(coords[c], coords[d], coords[a]); const cdB = orient(coords[c], coords[d], coords[b]);
+      if (abC * abD < 0 && cdA * cdB < 0) count++;
+    }
+    return count;
+  };
+  if (!vertices.length) return { vertices: [], edges: edges.map((edge) => ({ ...edge })), crossings: 0 };
+  const score = (coords: { x: number; y: number }[]) => {
+    const crossings = crossingCount(coords); let overlap = 0;
+    for (let i = 0; i < coords.length; i++) for (let j = i + 1; j < coords.length; j++) {
+      const distance = Math.hypot(coords[i].x - coords[j].x, coords[i].y - coords[j].y);
+      if (distance < 58) overlap += (58 - distance) ** 2;
+    }
+    return crossings * 100000 + overlap * 3;
+  };
+  let best = vertices.map((vertex) => ({ x: vertex.x, y: vertex.y })); let bestScore = score(best);
+  for (let restart = 0; restart < 4 && bestScore >= 100000; restart++) {
+    let current = vertices.map((_, index) => {
+      const angle = index * Math.PI * 2 / vertices.length - Math.PI / 2;
+      const radius = 120 + Math.random() * 150;
+      return { x: 500 + Math.cos(angle) * radius, y: 340 + Math.sin(angle) * radius * 0.75 };
+    });
+    let currentScore = score(current);
+    for (let iteration = 0; iteration < 4500 && bestScore >= 100000; iteration++) {
+      const index = Math.floor(Math.random() * current.length); const previous = current[index];
+      const temperature = 75 * (1 - iteration / 4500) + 2;
+      current[index] = { x: Math.max(40, Math.min(960, previous.x + (Math.random() - .5) * temperature * 2)), y: Math.max(40, Math.min(640, previous.y + (Math.random() - .5) * temperature * 2)) };
+      const nextScore = score(current);
+      if (nextScore < currentScore || Math.random() < Math.exp((currentScore - nextScore) / (temperature * 35))) currentScore = nextScore;
+      else current[index] = previous;
+      if (currentScore < bestScore) { best = current.map((point) => ({ ...point })); bestScore = currentScore; }
+    }
+  }
+  const layoutEdges = edges.map((edge) => ({ ...edge }));
+  const bundles = new Map<string, Edge[]>();
+  layoutEdges.forEach((edge) => { const key = [edge.from, edge.to].sort().join('>'); bundles.set(key, [...(bundles.get(key) ?? []), edge]); });
+  for (const bundle of bundles.values()) if (bundle.length > 1 && bundle[0].from !== bundle[0].to) {
+    bundle.forEach((edge, index) => { const bend = (index - (bundle.length - 1) / 2) * 34; edge.bend = edge.from < edge.to ? bend : -bend; });
+  }
+  return { vertices: vertices.map((vertex, index) => ({ ...vertex, x: best[index].x, y: best[index].y })), edges: layoutEdges, crossings: crossingCount(best) };
+}
+
 function MatrixView({ rows, columns, values }: { rows: string[]; columns: string[]; values: number[][] }) {
   return <div className="matrix-scroll"><table className="representation-matrix"><thead><tr><th />{columns.map((column, index) => <th key={`${column}-${index}`}>{column}</th>)}</tr></thead><tbody>{rows.map((row, rowIndex) => <tr key={`${row}-${rowIndex}`}><th>{row}</th>{values[rowIndex]?.map((value, columnIndex) => <td key={`${rowIndex}-${columnIndex}`} className={value ? 'nonzero-cell' : ''}>{value}</td>)}</tr>)}</tbody></table></div>;
 }
 
 function App() {
   const [initialGraph] = useState(generateRandomGraph);
-  const [vertices, setVertices] = useState(initialGraph.vertices);
-  const [edges, setEdges] = useState(initialGraph.edges);
-  const [directed, setDirected] = useState(false);
+  const [graphA, setGraphA] = useState<GraphState>({ ...initialGraph, directed: false });
+  const [graphB, setGraphB] = useState<GraphState>(() => ({ ...generateRandomGraph(), directed: false }));
+  const [selectedGraph, setSelectedGraph] = useState<'A' | 'B'>('A');
+  const [isomorphismResult, setIsomorphismResult] = useState<ReturnType<typeof checkIsomorphism> | null>(null);
+  const [planarityResult, setPlanarityResult] = useState<ReturnType<typeof testPlanarity> | null>(null);
+  const [symmetryResult, setSymmetryResult] = useState<ReturnType<typeof findAutomorphisms> | null>(null);
+  const [layoutAnimation, setLayoutAnimation] = useState(false);
+  const activeGraph = selectedGraph === 'A' ? graphA : graphB;
+  const vertices = activeGraph.vertices;
+  const edges = activeGraph.edges;
+  const directed = activeGraph.directed;
+  const updateActiveGraph = (update: (graph: GraphState) => GraphState) => (selectedGraph === 'A' ? setGraphA : setGraphB)(update);
+  const setVertices = (value: Vertex[] | ((previous: Vertex[]) => Vertex[])) => updateActiveGraph((graph) => ({ ...graph, vertices: typeof value === 'function' ? value(graph.vertices) : value }));
+  const setEdges = (value: Edge[] | ((previous: Edge[]) => Edge[])) => updateActiveGraph((graph) => ({ ...graph, edges: typeof value === 'function' ? value(graph.edges) : value }));
+  const setDirected = (value: boolean | ((previous: boolean) => boolean)) => updateActiveGraph((graph) => ({ ...graph, directed: typeof value === 'function' ? value(graph.directed) : value }));
   const [weighted, setWeighted] = useState(true);
   const [mode, setMode] = useState<Mode>('select');
   const [selectedVertex, setSelectedVertex] = useState<string | null>(null);
@@ -241,6 +490,7 @@ function App() {
     return edge.from === vertex.id || edge.to === vertex.id ? 1 : 0;
   })), [vertices, edges, directed]);
   useEffect(() => { setEulerStep(null); }, [vertices, edges, directed]);
+  useEffect(() => { setPlanarityResult(null); setSymmetryResult(null); setIsomorphismResult(null); }, [graphA, graphB]);
   useEffect(() => {
     if (eulerStep === null || !euler) return;
     if (eulerStep >= euler.edges.length) {
@@ -445,14 +695,65 @@ function App() {
     } catch { notify('Could not read that graph file'); }
     event.target.value = '';
   };
-  const randomizeGraph = () => {
-    const graph = generateRandomGraph();
-    setVertices(graph.vertices); setEdges(graph.edges); setDirected(false); setWeighted(true); setSelectedVertex(null); setSelectedEdge(null); setConnectStart(null); setMode('select');
-    notify('Random graph generated');
-  };
   const deleteGraph = () => {
     setVertices([]); setEdges([]); setSelectedVertex(null); setSelectedEdge(null); setConnectStart(null); setMode('select');
     notify('Graph cleared');
+  };
+  const selectGraph = (graph: 'A' | 'B') => {
+    setSelectedGraph(graph); setSelectedVertex(null); setSelectedEdge(null); setConnectStart(null); setConnectPreview(null); setPlanarityResult(null); setSymmetryResult(null);
+  };
+  const copyGraphAtoB = () => {
+    setGraphB({ vertices: graphA.vertices.map((vertex) => ({ ...vertex, x: Math.max(50, Math.min(950, vertex.x + 25)), y: Math.max(50, Math.min(630, vertex.y + 20)) })), edges: graphA.edges.map((edge) => ({ ...edge })), directed: graphA.directed });
+    setIsomorphismResult(null); notify('Graph A copied to Graph B');
+  };
+  const generateComplement = () => {
+    const present = new Set(edges.map((edge) => directed ? `${edge.from}>${edge.to}` : [edge.from, edge.to].sort().join('>')));
+    const complement: Edge[] = [];
+    vertices.forEach((from, i) => vertices.forEach((to, j) => {
+      if (from.id === to.id || (!directed && j <= i)) return;
+      const key = directed ? `${from.id}>${to.id}` : [from.id, to.id].sort().join('>');
+      if (!present.has(key)) complement.push({ id: `complement-${Date.now()}-${complement.length}`, from: from.id, to: to.id, weight: 1, bend: 0 });
+    }));
+    setEdges(complement); setSelectedVertex(null); setSelectedEdge(null); setPlanarityResult(null); notify(`Complement generated · ${complement.length} edges`);
+  };
+  const compareGraphs = () => {
+    setIsomorphismResult(checkIsomorphism(graphA, graphB)); setTab('explorers');
+  };
+  const runPlanarityTest = () => {
+    const result = testPlanarity(activeGraph);
+    setPlanarityResult(result);
+    if (result.status === 'planar') notify('Planar · a crossing-free layout exists');
+    else if (result.status === 'nonplanar') notify('Nonplanar · moving vertices alone cannot remove all crossings');
+    else notify('Planarity search limit reached');
+  };
+  const animatePlanarLayout = () => {
+    const planarity = testPlanarity(activeGraph);
+    if (planarity.status === 'unknown') {
+      setPlanarityResult(planarity);
+      notify('Planarity could not be determined; no edges were changed');
+      return;
+    }
+    if (planarity.status === 'planar') {
+      const layout = improvePlanarLayout(vertices, edges);
+      setEdges(layout.edges);
+      setLayoutAnimation(true); setVertices(layout.vertices); window.setTimeout(() => setLayoutAnimation(false), 1700);
+      window.setTimeout(() => setPlanarityResult({ status: 'planar', reason: `All ${edges.length} edges were preserved. The layout search found ${layout.crossings} straight-line crossings.` }), 0);
+      notify(`Graph is planar · all ${edges.length} edges preserved`);
+      return;
+    }
+    const layout = planarizeLayout(vertices, edges);
+    setEdges(layout.edges.map((edge) => ({ ...edge, bend: 0 })));
+    setLayoutAnimation(true); setVertices(layout.vertices); window.setTimeout(() => setLayoutAnimation(false), 1700);
+    window.setTimeout(() => setPlanarityResult({ status: 'planar', reason: `The original graph was nonplanar. A crossing-free spanning forest is drawn; ${layout.removed} loop, parallel, or cycle edge${layout.removed === 1 ? ' was' : 's were'} removed.` }), 0);
+    notify(`Nonplanar graph converted to a forest · ${layout.removed} edge${layout.removed === 1 ? '' : 's'} removed`);
+  };
+  const runSymmetryAnalysis = () => { setSymmetryResult(findAutomorphisms(activeGraph)); setTab('explorers'); };
+  const createGraph = () => {
+    const graph = generateRandomGraph();
+    const state = { ...graph, directed: false };
+    if (selectedGraph === 'A') setGraphA(state); else setGraphB(state);
+    setSelectedVertex(null); setSelectedEdge(null); setConnectStart(null); setConnectPreview(null); setMode('select');
+    notify(`Random Graph ${selectedGraph} generated`);
   };
   const showEuler = () => {
     setTab('algorithms');
@@ -470,9 +771,10 @@ function App() {
         <div className="top-divider" />
         <div className="document-name"><span className="live-dot" />Untitled graph <ChevronDown size={14} /></div>
         <div className="header-spacer" />
+        <div className="graph-tabs"><button className={selectedGraph === 'A' ? 'graph-tab-active' : ''} onClick={() => selectGraph('A')}>Graph A <small>{graphA.vertices.length}</small></button><button className={selectedGraph === 'B' ? 'graph-tab-active' : ''} onClick={() => selectGraph('B')}>Graph B <small>{graphB.vertices.length}</small></button></div>
         <div className="graph-tags"><span className="tag"><span className="tag-dot" />{directed ? 'Directed' : 'Undirected'}</span><span className="tag">{vertices.length} vertices</span><span className="tag">{edges.length} edges</span></div>
-        <button className="header-action random-action" title="Generate a random graph" onClick={randomizeGraph}><Dices size={14} />Random</button>
-        <button className="header-action clear-action" title="Delete the entire graph" onClick={deleteGraph}><Trash2 size={14} />Clear graph</button>
+        <button className="header-action random-action" title={`Generate a random graph ${selectedGraph}`} onClick={createGraph}><Dices size={14} />Random</button>
+        <button className="header-action clear-action" title={`Delete Graph ${selectedGraph}`} onClick={deleteGraph}><Trash2 size={14} />Clear graph</button>
         <button className="icon-button header-icon" title="Import graph" onClick={() => fileInput.current?.click()}><Upload size={16} /></button>
         <button className="share-button" onClick={exportGraph}><Share2 size={15} /> Export</button>
         <input ref={fileInput} className="hidden-input" type="file" accept="application/json" onChange={importGraph} />
@@ -489,12 +791,13 @@ function App() {
           <div className="rail-group rail-quick">
             <button className="tool-button compact" title="Toggle directed graph" onClick={() => setDirected((v) => !v)}>{directed ? <ArrowDownUp size={17} /> : <ArrowLeftRight size={17} />}<span>{directed ? 'Directed' : 'Undirected'}</span></button>
             <button className={`tool-button compact ${weighted ? 'active-soft' : ''}`} title="Toggle edge weights" onClick={() => setWeighted((v) => !v)}><Activity size={17} /><span>Weights</span></button>
+            <button className="tool-button compact complement-button" title="Generate the graph complement" onClick={generateComplement}><Network size={17} /><span>Complement</span></button>
           </div>
           <div className="rail-bottom"><button className="help-button" title="GraphLab help" onClick={() => notify('Ctrl-drag creates an edge · Shift-drag creates a directed edge')}><CircleHelp size={17} /></button></div>
         </aside>
         <section className="canvas-column">
           <div className="canvas-toolbar">
-            <div className="canvas-breadcrumb"><span>CANVAS</span><span className="breadcrumb-dot">/</span><strong>{directed ? 'Directed graph' : 'Undirected multigraph'}</strong></div>
+            <div className="canvas-breadcrumb"><span>CANVAS</span><span className="breadcrumb-dot">/</span><strong>{`Graph ${selectedGraph} · ${directed ? 'Directed graph' : 'Undirected multigraph'}`}</strong></div>
             <div className="canvas-actions">
               <span className="keyboard-hint">{mode === 'vertex' ? 'CLICK CANVAS TO ADD' : mode === 'edge' ? (connectStart ? 'NOW SELECT ANOTHER VERTEX' : 'SELECT TWO VERTICES') : mode === 'delete' ? 'CLICK TO DELETE' : 'DRAG CANVAS TO PAN · WHEEL TO ZOOM'}</span>
               <div className="small-divider" />
@@ -502,7 +805,7 @@ function App() {
             </div>
           </div>
           <div className="canvas-wrap">
-            <svg ref={svgRef} className={`graph-canvas mode-${mode} ${isPanning ? 'is-panning' : ''}`} viewBox={`${pan.x} ${pan.y} ${1000 * 100 / zoom} ${680 * 100 / zoom}`} preserveAspectRatio="xMidYMid meet" onPointerDown={handleCanvasPointerDown} onPointerMove={onPointerMove} onPointerUp={endDrag} onPointerCancel={endDrag} onWheel={handleCanvasWheel}>
+            <svg ref={svgRef} className={`graph-canvas mode-${mode} ${isPanning ? 'is-panning' : ''} ${layoutAnimation ? 'planarizing' : ''}`} viewBox={`${pan.x} ${pan.y} ${1000 * 100 / zoom} ${680 * 100 / zoom}`} preserveAspectRatio="xMidYMid meet" onPointerDown={handleCanvasPointerDown} onPointerMove={onPointerMove} onPointerUp={endDrag} onPointerCancel={endDrag} onWheel={handleCanvasWheel}>
               <defs><pattern id="dot-grid" width="24" height="24" patternUnits="userSpaceOnUse"><circle cx="1" cy="1" r="1" fill="#293039" /></pattern><marker id="arrow" markerWidth="8" markerHeight="8" refX="7" refY="4" orient="auto" markerUnits="userSpaceOnUse"><path d="M0,0 L8,4 L0,8 z" fill="#8b96a4" /></marker><marker id="arrow-active" markerWidth="8" markerHeight="8" refX="7" refY="4" orient="auto" markerUnits="userSpaceOnUse"><path d="M0,0 L8,4 L0,8 z" fill="#94f3cb" /></marker><marker id="arrow-mst" markerWidth="8" markerHeight="8" refX="7" refY="4" orient="auto" markerUnits="userSpaceOnUse"><path d="M0,0 L8,4 L0,8 z" fill="#63a9ff" /></marker><marker id="arrow-euler" markerWidth="8" markerHeight="8" refX="7" refY="4" orient="auto" markerUnits="userSpaceOnUse"><path d="M0,0 L8,4 L0,8 z" fill="#94f3cb" /></marker></defs>
               <rect className="canvas-bg" width="1000" height="680" fill="url(#dot-grid)" style={{ pointerEvents: 'none' }} />
               {connectPreview && (() => {
@@ -548,7 +851,7 @@ function App() {
           <div className="bottom-strip"><span><Grid2X2 size={14} /> {components.length} {components.length === 1 ? 'component' : 'components'}</span><span className="strip-separator" /><span><Layers size={14} /> Multigraph enabled</span><span className="strip-spacer" /><span className="coordinates">GRAPH THEORY / INTERACTIVE MODE</span></div>
         </section>
         <aside className="inspector">
-          <div className="inspector-tabs"><button className={tab === 'overview' ? 'tab-active' : ''} onClick={() => setTab('overview')}>Overview</button><button className={tab === 'algorithms' ? 'tab-active' : ''} onClick={() => setTab('algorithms')}>Algorithms <span className="new-dot" /></button><button className={tab === 'representations' ? 'tab-active' : ''} onClick={() => setTab('representations')}>Matrices</button></div>
+          <div className="inspector-tabs"><button className={tab === 'overview' ? 'tab-active' : ''} onClick={() => setTab('overview')}>Overview</button><button className={tab === 'algorithms' ? 'tab-active' : ''} onClick={() => setTab('algorithms')}>Algorithms <span className="new-dot" /></button><button className={tab === 'representations' ? 'tab-active' : ''} onClick={() => setTab('representations')}>Matrices</button><button className={tab === 'explorers' ? 'tab-active' : ''} onClick={() => setTab('explorers')}>Explore</button></div>
           {tab === 'overview' ? <div className="inspector-scroll">
             <section className="panel-section graph-summary"><div className="section-eyebrow">GRAPH SUMMARY <span className="summary-spark"><Sparkles size={13} /></span></div><h2>{directed ? 'Directed' : 'Undirected'}<br /><span>{edges.length > 0 && edges.length >= vertices.length ? 'multigraph' : 'graph'}</span></h2><div className="summary-meta"><span><b>{vertices.length}</b> vertices</span><span><b>{edges.length}</b> edges</span></div></section>
                 <section className="panel-section"><div className="section-title">Structure <button className="plain-icon" title="Structural properties"><Info size={14} /></button></div><div className="property-list"><div className="property-row"><span>{directed ? 'Weakly connected' : 'Connected'}</span><span className={`property-value ${components.length === 1 ? 'good' : 'warn'}`}><i />{components.length === 1 ? 'Yes' : 'No'}</span></div><div className="property-row"><span>Components</span><span className="property-value">{components.length}</span></div><div className="property-row"><span>Average degree</span><span className="property-value">{graphProperties.averageDegree.toFixed(2)}</span></div><div className="property-row"><span>Complete</span><span className={`property-value ${graphProperties.complete ? 'good' : ''}`}>{graphProperties.complete ? 'Yes' : 'No'}</span></div><div className="property-row"><span>Bipartite</span><span className={`property-value ${graphProperties.bipartite ? 'good' : 'warn'}`}>{graphProperties.bipartite ? 'Yes' : 'No'}</span></div><div className="property-row"><span>Regular</span><span className={`property-value ${graphProperties.regular ? 'good' : ''}`}>{graphProperties.regular ? `Yes · degree ${graphProperties.regularDegree}` : 'No'}</span></div><div className="property-row"><span>Self-loops</span><span className="property-value">{edges.filter((e) => e.from === e.to).length}</span></div><div className="property-row"><span>Parallel edges</span><span className="property-value">{edges.length - new Set(edges.map((e) => [e.from, e.to].sort().join(':'))).size}</span></div><div className="property-row"><span>Density</span><span className="property-value">{(graphProperties.density * 100).toFixed(0)}%</span></div></div></section>
@@ -559,12 +862,20 @@ function App() {
             <section className="panel-section algo-card"><div className="algo-card-top"><span className="algorithm-icon euler-icon"><GitBranch size={17} /></span><span className={`algo-status ${euler ? 'status-available' : 'status-unavailable'}`}>{euler ? 'FOUND' : 'NOT FOUND'}</span></div><h3>Euler trail</h3><p>A walk that traverses every edge exactly once.</p>{euler ? <div className="result-route">{euler.vertices.map((id, i) => <span key={`${id}-${i}`}>{i > 0 && <b>→</b>}{vertices.find((vertex) => vertex.id === id)?.label ?? id}</span>)}</div> : <div className="empty-result">No Euler trail exists. Check connectivity and vertex degrees.</div>}<button className="run-button" onClick={showEuler}>{eulerStep === null ? 'Animate Euler trail' : 'Replay Euler trail'} <ArrowDownUp size={14} /></button></section>
             <section className="panel-section algo-card"><div className="algo-card-top"><span className="algorithm-icon tree-icon"><Network size={17} /></span><span className={`algo-status ${mst.complete ? 'status-available' : 'status-unavailable'}`}>{mst.complete ? 'CONNECTED' : 'DISCONNECTED'}</span></div><h3>Minimum spanning tree</h3><p>Kruskal’s algorithm · undirected interpretation.</p>{mst.complete ? <div className="mst-result"><span>{mst.edges.length} edges</span><strong>Total weight <b>{mst.total}</b></strong></div> : <div className="empty-result">A spanning tree exists only when the graph is connected.</div>}<button className="run-button" onClick={runMst}>Find spanning tree <ArrowDownUp size={14} /></button></section>
             <section className="panel-section algo-card compact-card"><div className="section-title">Connected components</div><p>{components.length === 1 ? 'Every vertex is reachable from every other vertex.' : `This graph has ${components.length} disconnected components.`}</p><div className="component-chips">{components.map((group, index) => <span key={index}>C{index + 1} · {group.map((id) => vertices.find((v) => v.id === id)?.label).join(', ')}</span>)}</div></section>
-          </div> : <div className="inspector-scroll representations-view">
+          </div> : tab === 'representations' ? <div className="inspector-scroll representations-view">
             <section className="panel-section algorithm-intro"><div className="section-eyebrow">GRAPH REPRESENTATIONS</div><h2>See it in<br /><span>another form.</span></h2><p>Multiedges appear as counts in adjacency matrices and repeated neighbors in lists.</p></section>
             <div className="representation-switcher"><button className={representation === 'adjacency-matrix' ? 'representation-active' : ''} onClick={() => setRepresentation('adjacency-matrix')}>Adjacency matrix</button><button className={representation === 'adjacency-list' ? 'representation-active' : ''} onClick={() => setRepresentation('adjacency-list')}>Adjacency list</button><button className={representation === 'incidence-matrix' ? 'representation-active' : ''} onClick={() => setRepresentation('incidence-matrix')}>Incidence matrix</button></div>
             {representation === 'adjacency-matrix' && <section className="representation-card"><div className="representation-heading"><h3>Adjacency matrix</h3><span>{directed ? 'rows → columns' : 'symmetric'}</span></div><p>Cells count parallel edges; undirected self-loops count twice on the diagonal.</p><MatrixView rows={vertices.map((vertex) => vertex.label)} columns={vertices.map((vertex) => vertex.label)} values={adjacencyMatrix} /></section>}
             {representation === 'adjacency-list' && <section className="representation-card"><div className="representation-heading"><h3>Adjacency list</h3><span>{directed ? 'out-neighbors' : 'neighbors'}</span></div><p>Repeated labels indicate parallel edges; undirected loops appear twice. Isolates have empty lists.</p><div className="adjacency-list">{adjacencyList.map(({ vertex, neighbors }) => <div className="adjacency-list-row" key={vertex.id}><span className="adjacency-list-vertex" style={{ '--vertex-color': vertex.color ?? palette[0] } as React.CSSProperties}>{vertex.label}</span><span className="adjacency-separator">→</span><span className="adjacency-neighbors">{neighbors.length ? neighbors.join(', ') : '∅'}</span></div>)}</div></section>}
             {representation === 'incidence-matrix' && <section className="representation-card"><div className="representation-heading"><h3>Incidence matrix</h3><span>{directed ? 'tail −1 · head +1' : 'endpoint = 1'}</span></div><p>Rows are vertices; columns are edges. An undirected loop contributes 2.</p><MatrixView rows={vertices.map((vertex) => vertex.label)} columns={edges.map((_, index) => `e${index + 1}`)} values={incidenceMatrix} /></section>}
+          </div> : <div className="inspector-scroll explorers-view">
+            <section className="panel-section algorithm-intro"><div className="section-eyebrow">GRAPH EXPLORERS</div><h2>Compare, test,<br /><span>discover.</span></h2><p>Switch the canvas between two independently editable graphs. Analyze structural equivalence and symmetry.</p></section>
+            <section className="panel-section graph-pair-card"><div className="graph-pair-heading"><span className="graph-pair-icon">A</span><div><b>Graph A</b><small>{graphA.vertices.length} vertices · {graphA.edges.length} edges · {graphA.directed ? 'directed' : 'undirected'}</small></div><button className="mini-select-button" onClick={() => selectGraph('A')}>{selectedGraph === 'A' ? 'Editing' : 'Edit'}</button></div><div className="graph-pair-heading"><span className="graph-pair-icon graph-b-icon">B</span><div><b>Graph B</b><small>{graphB.vertices.length} vertices · {graphB.edges.length} edges · {graphB.directed ? 'directed' : 'undirected'}</small></div><button className="mini-select-button" onClick={() => selectGraph('B')}>{selectedGraph === 'B' ? 'Editing' : 'Edit'}</button></div><button className="run-button" onClick={copyGraphAtoB}>Copy A into B <Copy size={13} /></button><button className="run-button" onClick={compareGraphs}>Check isomorphism <ArrowDownUp size={14} /></button>
+              {isomorphismResult && <div className={`explorer-result ${isomorphismResult.isomorphic ? 'result-positive' : isomorphismResult.inconclusive ? '' : 'result-negative'}`}><strong>{isomorphismResult.isomorphic ? 'Isomorphic' : isomorphismResult.inconclusive ? 'Inconclusive' : 'Not isomorphic'}</strong><p>{isomorphismResult.reason}</p>{isomorphismResult.mapping && <div className="correspondence-list">{[...isomorphismResult.mapping].map(([sourceId, targetId]) => <span key={sourceId}>{graphA.vertices.find((vertex) => vertex.id === sourceId)?.label} <i>↔</i> {graphB.vertices.find((vertex) => vertex.id === targetId)?.label}</span>)}</div>}</div>}
+            </section>
+            <section className="panel-section explorer-card"><div className="explorer-card-heading"><span className="algorithm-icon tree-icon"><Network size={16} /></span><div><b>Planarity explorer</b><small>Exact rotation-system search with a bounded high-degree limit.</small></div></div><div className="explorer-button-row"><button className="run-button" onClick={runPlanarityTest}>Test planarity <Check size={13} /></button><button className="run-button" onClick={animatePlanarLayout}>Planarize + animate <Activity size={13} /></button></div>{planarityResult && <div className={`explorer-result ${planarityResult.status === 'planar' ? 'result-positive' : planarityResult.status === 'nonplanar' ? 'result-negative' : ''}`}><strong>{planarityResult.status === 'unknown' ? 'Inconclusive' : planarityResult.status === 'planar' ? 'Planar' : 'Nonplanar'}</strong><p>{planarityResult.reason}</p></div>}</section>
+            <section className="panel-section explorer-card"><div className="explorer-card-heading"><span className="algorithm-icon euler-icon"><Sparkles size={16} /></span><div><b>Symmetry explorer</b><small>Automorphisms, equivalent vertices, and vertex orbits.</small></div></div><button className="run-button" onClick={runSymmetryAnalysis}>Find automorphisms <ArrowDownUp size={14} /></button>{symmetryResult && <div className="explorer-result result-positive"><strong>{symmetryResult.truncated ? `${symmetryResult.automorphisms.length}+ automorphisms found` : `${symmetryResult.automorphisms.length} automorphisms`}</strong><p>{symmetryResult.truncated ? 'Enumeration capped at 20,000; shown orbits are from discovered symmetries.' : 'Automorphisms preserve all adjacencies and edge multiplicities.'}</p><div className="orbit-list">{symmetryResult.orbits.map((orbit, index) => <div key={index}><small>ORBIT {index + 1}</small><span>{orbit.map((i) => (selectedGraph === 'A' ? graphA.vertices[i]?.label : graphB.vertices[i]?.label)).join(' · ')}</span></div>)}</div></div>}</section>
+            <section className="panel-section explorer-card"><div className="explorer-card-heading"><span className="algorithm-icon euler-icon"><Copy size={16} /></span><div><b>Complement graph</b><small>Create every missing edge on the current vertex set.</small></div></div><button className="run-button" onClick={generateComplement}>Generate complement <ArrowDownUp size={14} /></button><p className="explorer-note">Complementing a multigraph treats each existing vertex pair as connected and produces a simple graph.</p></section>
           </div>}
           <div className="inspector-footer"><div className="footer-logo"><span className="footer-mark"><Waypoints size={13} /></span>GraphLab <span className="footer-version">v1.0</span></div><button className="plain-icon" onClick={() => notify('GraphLab · Interactive graph theory workbench')} title="About"><CircleHelp size={15} /></button></div>
         </aside>

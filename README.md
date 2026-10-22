@@ -16,6 +16,9 @@ GraphLab is an interactive graph theory workbench for building, editing, and exp
 - Inspect average degree, completeness, bipartiteness, and regularity.
 - View adjacency matrices, adjacency lists, and incidence matrices.
 - Animate Euler trails and compute a minimum spanning tree with Kruskal’s algorithm.
+- Compare two graphs for isomorphism and inspect vertex correspondences.
+- Test planarity, explore a planarized subgraph, and animate a crossing-reduced layout.
+- Generate graph complements and inspect automorphism counts and vertex orbits.
 - Import and export graph data as JSON.
 
 ## Run locally
@@ -29,3 +32,5 @@ Choose a tool in the left rail. Select **Vertex** and click the canvas to add on
 In **Select** mode, Ctrl-drag from one vertex to another to create an edge, or Shift-drag to create a directed edge. Select a vertex to edit its color. Use **Random** to generate a new graph and **Clear graph** to empty the canvas.
 
 Open **Matrices** in the inspector to switch between adjacency matrix, adjacency list, and incidence matrix. Matrix entries count parallel edges; undirected self-loops contribute 2 to degree and the diagonal. Graph properties update live as vertices and edges change. Use **Animate Euler trail** in the Algorithms panel to play an Euler trail across the canvas when one exists. The minimum spanning tree is highlighted in blue in the Algorithms view.
+
+Use **Graph A** and **Graph B** in the header to edit either graph. The **Explore** panel compares them for isomorphism, reports correspondence mappings, tests planarity, and lists automorphism orbits. **Planarize + animate** preserves every edge when the graph is planar and searches for a less-crossing layout. For a graph proven nonplanar, it falls back to a crossing-free spanning forest and explains which edges were removed. **Complement** replaces the active graph's edges with its missing pairs/arcs.
